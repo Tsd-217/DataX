@@ -19,6 +19,8 @@ public class Key {
     public static final String DATE_FORMAT = "dateFormat";
     // must have
     public static final String WRITE_MODE = "writeMode";
+    //not must have
+    public static final String IS_PT_TABLE="isCreatePath";
     // must have
     public static final String FIELD_DELIMITER = "fieldDelimiter";
     // not must, default UTF-8
@@ -33,4 +35,11 @@ public class Key {
     public static final String KERBEROS_PRINCIPAL = "kerberosPrincipal";
     // hadoop config
     public static final String HADOOP_CONFIG = "hadoopConfig";
+    // hive config
+    public static final String HIVE_URL="hiveUrl";
+    public static final String HIVE_USER="hiveUser";
+    public static final String HIVE_PASSWORD="hivePassword";
+    //hive sql
+    public static final String HQL="hql";
+
 }

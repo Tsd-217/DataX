@@ -13,6 +13,10 @@ import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.*;
 
 
@@ -24,6 +28,7 @@ public class HdfsWriter extends Writer {
 
         private String defaultFS;
         private String path;
+        private String isCreatePath;
         private String fileType;
         private String fileName;
         private List<Configuration> columns;
@@ -34,6 +39,14 @@ public class HdfsWriter extends Writer {
         private HashSet<String> tmpFiles = new HashSet<String>();//临时文件全路径
         private HashSet<String> endFiles = new HashSet<String>();//最终文件全路径
 
+        //hive相关配置
+        private String hiveUrl;
+        private String hiveUser;
+        private String hivePassword;
+        //后置hql
+        private String hql;
+        //配置相关定义
+        private static Statement stmt = null;
         private HdfsHelper hdfsHelper = null;
 
         @Override
@@ -81,10 +94,10 @@ public class HdfsWriter extends Writer {
             //writeMode check
             this.writeMode = this.writerSliceConfig.getNecessaryValue(Key.WRITE_MODE, HdfsWriterErrorCode.REQUIRED_VALUE);
             writeMode = writeMode.toLowerCase().trim();
-            Set<String> supportedWriteModes = Sets.newHashSet("append", "nonconflict", "truncate");
+            Set<String> supportedWriteModes = Sets.newHashSet("append", "nonconflict", "truncate","truncateall");
             if (!supportedWriteModes.contains(writeMode)) {
                 throw DataXException.asDataXException(HdfsWriterErrorCode.ILLEGAL_VALUE,
-                        String.format("仅支持append, nonConflict, truncate三种模式, 不支持您配置的 writeMode 模式 : [%s]",
+                        String.format("仅支持append, nonConflict, truncate,truncateAll四种模式, 不支持您配置的 writeMode 模式 : [%s]",
                                 writeMode));
             }
             this.writerSliceConfig.set(Key.WRITE_MODE, writeMode);
@@ -143,22 +156,91 @@ public class HdfsWriter extends Writer {
                 throw DataXException.asDataXException(HdfsWriterErrorCode.ILLEGAL_VALUE,
                         String.format("不支持您配置的编码格式:[%s]", encoding), e);
             }
+            //isCreatePath check
+            this.isCreatePath = this.writerSliceConfig.getString(Key.IS_PT_TABLE,"false");
+            isCreatePath=isCreatePath.toLowerCase().trim();
+            HashSet<String> supportedIsCreatePath = Sets.newHashSet("true", "false");
+            if (!supportedIsCreatePath.contains(isCreatePath)){
+                throw DataXException.asDataXException(HdfsWriterErrorCode.CREATE_PATH_ERROR,
+                        String.format("仅支持true、false两种方式，不支持您配置的isCreatePath的参数")
+                        );
+            }
+
+            /**
+             * author：Tsd
+             * hiveConfig && hql  check
+             */
+            this.hiveUrl=this.writerSliceConfig.getString(Key.HIVE_URL,null);
+            this.hiveUser=this.writerSliceConfig.getString(Key.HIVE_USER,null);
+            this.hivePassword=this.writerSliceConfig.getString(Key.HIVE_PASSWORD,null);
+            this.hql=this.writerSliceConfig.getString(Key.HQL,null);
+            if (null!=hiveUrl && null!=hiveUser && null!=hivePassword && null!=hql){
+                LOG.info("配置了hive相关参数，datax同步数据结束后将连接hive执行[%s]",hql);
+            }else if (null==hiveUrl && null==hiveUser && null==hivePassword && null==hql){
+                 LOG.info("未配置hive相关连接，datax同步数据后结束");
+            }else {
+                throw DataXException.asDataXException(HdfsWriterErrorCode.CREATE_PATH_ERROR,
+                        String.format("请检查配置的hive相关参数，注意url、user、password、hql是否完整")
+                );
+            }
+
+
+
+
+
         }
 
         @Override
         public void prepare() {
+
+            /**
+             * author:Tsd
+             * 若路径不存在，检查isCreatePath值是否为true，若为true则创建对应路径
+             */
+
+            if (!hdfsHelper.isPathexists(path)){
+               if (isCreatePath.equalsIgnoreCase("true")){
+                   hdfsHelper.createFiles(path);
+                   LOG.info(String.format("由于您配置了isCreatePath的值为true且对应[%s] 不存在, datax自动创建对应[%s]",
+                           path, path));
+
+               }else if (isCreatePath.equalsIgnoreCase("false")){
+                   throw DataXException.asDataXException(HdfsWriterErrorCode.CREATE_PATH_ERROR,
+                           String.format("isCreatePath的值为false，且false为默认值，若需要自动创建路径，请设置为true",
+                                   isCreatePath));
+               }
+               else {
+                   throw DataXException.asDataXException(HdfsWriterErrorCode.CREATE_PATH_ERROR,
+                           String.format("您配置的isCreatePath: [%s] 有误，请设置该值为true或false，true表示写入分区表，若路径不存在会自动创建路径；为false表示写入非分区表，" +
+                                           "若路径不存在，不会自动创建路径",
+                                   isCreatePath));
+               }
+            }
             //若路径已经存在，检查path是否是目录
-            if(hdfsHelper.isPathexists(path)){
-                if(!hdfsHelper.isPathDir(path)){
+           else if(hdfsHelper.isPathexists(path)) {
+               if (hdfsHelper.isPathDir(path)){
+                   LOG.info(String.format("您配置的path为:[%s],该路径是已存在路径且datax校验通过",path));
+               }
+                else if (!hdfsHelper.isPathDir(path)){
                     throw DataXException.asDataXException(HdfsWriterErrorCode.ILLEGAL_VALUE,
                             String.format("您配置的path: [%s] 不是一个合法的目录, 请您注意文件重名, 不合法目录名等情况.",
                                     path));
                 }
+            }
                 //根据writeMode对目录下文件进行处理
                 Path[] existFilePaths = hdfsHelper.hdfsDirList(path,fileName);
                 boolean isExistFile = false;
                 if(existFilePaths.length > 0){
                     isExistFile = true;
+                }
+            /**
+             * author:Tsd
+             * 根据writeMode对目录下文件进行处理，适用truncateAll
+             */
+            Path[] existAllFilePaths = hdfsHelper.hdfsDirListAll(path);
+                boolean isExistAllFile=false;
+                if (existAllFilePaths.length>0){
+                    isExistAllFile=true;
                 }
                 /**
                  if ("truncate".equals(writeMode) && isExistFile ) {
@@ -180,18 +262,46 @@ public class HdfsWriter extends Writer {
                     throw DataXException.asDataXException(HdfsWriterErrorCode.ILLEGAL_VALUE,
                             String.format("由于您配置了writeMode nonConflict,但您配置的path: [%s] 目录不为空, 下面存在其他文件或文件夹.", path));
                 }else if ("truncate".equalsIgnoreCase(writeMode) && isExistFile) {
-                    LOG.info(String.format("由于您配置了writeMode truncate,  [%s] 下面的内容将被覆盖重写", path));
+                    LOG.info(String.format("由于您配置了writeMode truncate,  [%s] 下面的内容将覆盖重写[%s]开头的文件,其他文件不受影响", path,fileName));
                     hdfsHelper.deleteFiles(existFilePaths);
                 }
-            }else{
-                throw DataXException.asDataXException(HdfsWriterErrorCode.ILLEGAL_VALUE,
-                        String.format("您配置的path: [%s] 不存在, 请先在hive端创建对应的数据库和表.", path));
-            }
+                /**
+                 * author:Tsd
+                 * 增加truncateAll，清除目录下所有
+                 */
+                else if ("truncateAll".equalsIgnoreCase(writeMode) && isExistAllFile) {
+                    LOG.info(String.format("由于您配置了writeMode truncateAll,  [%s] 下面的内容将全部被覆盖重写", path));
+                    hdfsHelper.deleteFiles(existAllFilePaths);
+                }
+
         }
 
         @Override
         public void post() {
+
             hdfsHelper.renameFile(tmpFiles, endFiles);
+            /**
+             * author:Tsd
+             * 添加后置sql语句
+             */
+            if (null!=hiveUrl && null!=hiveUser && null!=hivePassword && null!=hql) {
+                Connection connect = HiveJdbcUtil.getConnection(hiveUrl, hiveUser, hivePassword);
+                try {
+                    stmt = connect.createStatement();
+                    stmt.execute(hql);
+
+                } catch (SQLException throwables) {
+                    throw DataXException.asDataXException(HdfsWriterErrorCode.SQL_ERROR,
+                            String.format("您的sql执行出错，请检查sql:[%s]", hql)
+                    );
+                } finally {
+                    HiveJdbcUtil.closeDBResources(stmt, connect);
+                }
+            }else {
+                LOG.info("datax同步数据完毕！");
+            }
+
+
         }
 
         @Override
@@ -287,7 +397,7 @@ public class HdfsWriter extends Writer {
          * @param userPath
          * @return
          */
-        private String buildTmpFilePath(String userPath) {
+         private String buildTmpFilePath(String userPath) {
             String tmpFilePath;
             boolean isEndWithSeparator = false;
             switch (IOUtils.DIR_SEPARATOR) {
@@ -332,8 +442,8 @@ public class HdfsWriter extends Writer {
 
         private String defaultFS;
         private String fileType;
+        private String path;
         private String fileName;
-
         private HdfsHelper hdfsHelper = null;
 
         @Override
@@ -344,7 +454,7 @@ public class HdfsWriter extends Writer {
             this.fileType = this.writerSliceConfig.getString(Key.FILE_TYPE);
             //得当的已经是绝对路径，eg：hdfs://10.101.204.12:9000/user/hive/warehouse/writer.db/text/test.textfile
             this.fileName = this.writerSliceConfig.getString(Key.FILE_NAME);
-
+            this.path = this.writerSliceConfig.getNecessaryValue(Key.PATH, HdfsWriterErrorCode.REQUIRED_VALUE);
             hdfsHelper = new HdfsHelper();
             hdfsHelper.getFileSystem(defaultFS, writerSliceConfig);
         }
@@ -375,6 +485,7 @@ public class HdfsWriter extends Writer {
         public void post() {
 
         }
+
 
         @Override
         public void destroy() {

@@ -24,9 +24,11 @@ import org.apache.hadoop.mapred.*;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
+
 
 public  class HdfsHelper {
     public static final Logger LOG = LoggerFactory.getLogger(HdfsWriter.Job.class);
@@ -35,13 +37,12 @@ public  class HdfsHelper {
     public org.apache.hadoop.conf.Configuration hadoopConf = null;
     public static final String HADOOP_SECURITY_AUTHENTICATION_KEY = "hadoop.security.authentication";
     public static final String HDFS_DEFAULTFS_KEY = "fs.defaultFS";
-
     // Kerberos
     private Boolean haveKerberos = false;
     private String  kerberosKeytabFilePath;
     private String  kerberosPrincipal;
 
-    public void getFileSystem(String defaultFS, Configuration taskConfig){
+    public void getFileSystem(String defaultFS, Configuration taskConfig) {
         hadoopConf = new org.apache.hadoop.conf.Configuration();
 
         Configuration hadoopSiteParams = taskConfig.getConfiguration(Key.HADOOP_CONFIG);
@@ -75,13 +76,16 @@ public  class HdfsHelper {
                     "message:defaultFS =" + defaultFS);
             LOG.error(message);
             throw DataXException.asDataXException(HdfsWriterErrorCode.CONNECT_HDFS_IO_ERROR, e);
+
         }
+
 
         if(null == fileSystem || null == conf){
             String message = String.format("获取FileSystem失败,请检查HDFS地址是否正确: [%s]",
                     "message:defaultFS =" + defaultFS);
             LOG.error(message);
             throw DataXException.asDataXException(HdfsWriterErrorCode.CONNECT_HDFS_IO_ERROR, message);
+
         }
     }
 
@@ -149,6 +153,28 @@ public  class HdfsHelper {
         return files;
     }
 
+    /**
+     *author:Tsd
+     * 遍历路径下文件目录
+     */
+    public Path[] hdfsDirListAll(String dir){
+        Path path = new Path(dir);
+        Path[] files = null;
+        try {
+            FileStatus[] status = fileSystem.listStatus(path);
+            files = new Path[status.length];
+            for(int i=0;i<status.length;i++){
+                files[i] = status[i].getPath();
+            }
+        } catch (IOException e) {
+            String message = String.format("获取目录[%s]下文件列表时发生网络IO异常,请检查您的网络是否正常！",
+                    dir);
+            LOG.error(message);
+            throw DataXException.asDataXException(HdfsWriterErrorCode.CONNECT_HDFS_IO_ERROR, e);
+        }
+        return files;
+    }
+
     public boolean isPathexists(String filePath) {
         Path path = new Path(filePath);
         boolean exist = false;
@@ -176,6 +202,21 @@ public  class HdfsHelper {
         return isDir;
     }
 
+    /**
+     * author:Tsd
+     * @param createPath
+     */
+    public void createFiles(String createPath){
+        try {
+            fileSystem.mkdirs(new Path(createPath));
+        } catch (IOException e) {
+            String message = String.format("删除文件[%s]时发生IO异常,请检查您的网络是否正常！",
+                    createPath);
+            LOG.error(message);
+            throw DataXException.asDataXException(HdfsWriterErrorCode.CONNECT_HDFS_IO_ERROR, e);
+        }
+    }
+
     public void deleteFiles(Path[] paths){
         for(int i=0;i<paths.length;i++){
             LOG.info(String.format("delete file [%s].", paths[i].toString()));
@@ -189,6 +230,7 @@ public  class HdfsHelper {
             }
         }
     }
+
 
     public void deleteDir(Path path){
         LOG.info(String.format("start delete tmp dir [%s] .",path.toString()));
@@ -447,6 +489,11 @@ public  class HdfsHelper {
                 case BOOLEAN:
                     objectInspector = ObjectInspectorFactory.getReflectionObjectInspector(Boolean.class, ObjectInspectorFactory.ObjectInspectorOptions.JAVA);
                     break;
+                /**
+                 * author:Tsd
+                 *新增map类型
+                  */
+
                 default:
                     throw DataXException
                             .asDataXException(
@@ -529,6 +576,8 @@ public  class HdfsHelper {
                             case TIMESTAMP:
                                 recordList.add(new java.sql.Timestamp(column.asDate().getTime()));
                                 break;
+
+
                             default:
                                 throw DataXException
                                         .asDataXException(
